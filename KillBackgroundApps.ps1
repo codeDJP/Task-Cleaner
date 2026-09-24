@@ -126,7 +126,101 @@ public class TaskbarDetector {
                 seenPids.Add(pid);
                 list.Add(new WinItem { Pid = pid, Title = title, IsIconic = isIconic });
             }
+            // UWP / Store apps draw inside ApplicationFrameHost: also protect the real app process that owns the content
+            uint framePid = pid;
+            EnumChildWindows(hWnd, (child, lp) => {
+                uint cpid = 0;
+                GetWindowThreadProcessId(child, out cpid);
+                if (cpid > 0 && cpid != framePid && cpid != currentPid && !seenPids.Contains(cpid)) {
+                    seenPids.Add(cpid);
+                    list.Add(new WinItem { Pid = cpid, Title = title, IsIconic = isIconic });
+                }
+                return true;
+            }, IntPtr.Zero);
         }
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PROCESSENTRY32W {
+        public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+
+    // Terminals and shells: everything running inside them is interactive work (a dev server, a CLI, a script).
+    static readonly HashSet<string> TerminalRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "wsl.exe", "wslhost.exe",
+        "OpenConsole.exe", "conhost.exe", "WindowsTerminal.exe", "wt.exe" };
+
+    // Shell hosts launch nearly every app (tray apps included), so protection never flows through them.
+    static readonly HashSet<string> NoInherit = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "explorer.exe", "svchost.exe", "sihost.exe", "ApplicationFrameHost.exe", "RuntimeBroker.exe",
+        "ShellExperienceHost.exe", "StartMenuExperienceHost.exe", "SearchHost.exe", "ShellHost.exe",
+        "TextInputHost.exe", "dwm.exe", "winlogon.exe", "userinit.exe", "services.exe", "wininit.exe",
+        "csrss.exe", "taskhostw.exe", "ctfmon.exe", "System", "[System Process]" };
+
+    /// PIDs that must never be terminated: every process with a visible window, the shell behind a
+    /// console window, every terminal/shell, and the whole child tree of all of those.
+    public static HashSet<int> GetProtectedPids(List<WinItem> windows) {
+        var names = new Dictionary<int, string>();
+        var parents = new Dictionary<int, int>();
+        IntPtr snap = CreateToolhelp32Snapshot(0x00000002 /*TH32CS_SNAPPROCESS*/, 0);
+        if (snap != IntPtr.Zero && snap != new IntPtr(-1)) {
+            try {
+                var e = new PROCESSENTRY32W();
+                e.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                if (Process32FirstW(snap, ref e)) {
+                    do { names[(int)e.th32ProcessID] = e.szExeFile; parents[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; }
+                    while (Process32NextW(snap, ref e));
+                }
+            } finally { CloseHandle(snap); }
+        }
+        var children = new Dictionary<int, List<int>>();
+        foreach (var kv in parents) {
+            if (kv.Value == kv.Key || !names.ContainsKey(kv.Value)) continue;
+            List<int> list;
+            if (!children.TryGetValue(kv.Value, out list)) { list = new List<int>(); children[kv.Value] = list; }
+            list.Add(kv.Key);
+        }
+
+        var roots = new List<int>();
+        roots.Add(System.Diagnostics.Process.GetCurrentProcess().Id);
+        foreach (var w in windows) {
+            int id = (int)w.Pid;
+            roots.Add(id);
+            string n; int pp;
+            if (names.TryGetValue(id, out n) && (string.Equals(n, "conhost.exe", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(n, "OpenConsole.exe", StringComparison.OrdinalIgnoreCase)) && parents.TryGetValue(id, out pp)) roots.Add(pp);
+        }
+        foreach (var kv in names) if (TerminalRoots.Contains(kv.Value)) roots.Add(kv.Key);
+
+        var result = new HashSet<int>();
+        var queue = new Queue<int>();
+        foreach (int r in roots) if (result.Add(r)) queue.Enqueue(r);
+        while (queue.Count > 0) {
+            int id = queue.Dequeue();
+            string n;
+            if (names.TryGetValue(id, out n) && NoInherit.Contains(n)) continue;
+            List<int> kids;
+            if (children.TryGetValue(id, out kids)) foreach (int c in kids) if (result.Add(c)) queue.Enqueue(c);
+        }
+        return result;
     }
 
     public static List<WinItem> GetTaskbarWindows() {
@@ -156,6 +250,8 @@ public class TaskbarDetector {
 
 # 1. Detect open taskbar windows
 $taskbarWins = [TaskbarDetector]::GetTaskbarWindows()
+# Process-level protection: visible apps, terminals/shells and everything running inside them
+$protectedPids = [TaskbarDetector]::GetProtectedPids($taskbarWins)
 $safeProcNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $protectedAppDetails = @()
 
@@ -184,7 +280,7 @@ $coreOSWhitelist = @(
     "audiodg", "ctfmon", "TextInputHost",
     "nvcontainer", "NVDisplay.Container", "atieclxx", "AudioCaptureService", "amdpmfservice", "amdpmfserviceuser",
     "StartMenuExperienceHost", "ShellExperienceHost", "RuntimeBroker",
-    "powershell", "pwsh", "cmd", "conhost", "Antigravity IDE", "bash", "wsl", "git", "python", "pythonw", "Code", "language_server_windows_x64",
+    "powershell", "pwsh", "cmd", "conhost", "OpenConsole", "WindowsTerminal", "wt", "Antigravity IDE", "bash", "wsl", "git", "python", "pythonw", "Code", "language_server_windows_x64",
     "DAX3API", "GameInputRedistService", "GameInputSvc", "Gbt.GpuPowerGear.Proxy", "Gbt.GpuPowerGear.Service"
 )
 
@@ -209,6 +305,7 @@ Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
     $pname = $proc.ProcessName
 
     if ($safeProcNames.Contains($pname)) { return }
+    if ($protectedPids.Contains($proc.Id)) { return }
 
     $isBloat = ($proc.SessionId -eq $userSession) -or 
                ($pname -like "*razer*") -or 
@@ -270,28 +367,31 @@ foreach ($proc in $toKill) {
             $killedCount++
         } catch {}
         try {
-            & taskkill.exe /F /PID $proc.Id /T 2>$null | Out-Null
+            & taskkill.exe /F /PID $proc.Id 2>$null | Out-Null
         } catch {}
     } else {
         $killedCount++
     }
 }
 
-# Force kill process trees by name
+# Catch respawned instances by name - never touching a protected process (visible app, terminal, or anything inside one)
+function Stop-UnprotectedByName([string]$name) {
+    foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+        if (-not $protectedPids.Contains($p.Id)) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {} }
+    }
+}
 if (-not $WhatIf) {
     if ($targetNames.Contains("msedgewebview2") -or $targetNames.Contains("SearchHost")) {
-        try { & taskkill.exe /F /IM "SearchHost.exe" /T 2>$null | Out-Null } catch {}
-        try { & taskkill.exe /F /IM "msedgewebview2.exe" /T 2>$null | Out-Null } catch {}
+        Stop-UnprotectedByName "SearchHost"
+        Stop-UnprotectedByName "msedgewebview2"
     }
 
     foreach ($tname in $targetNames) {
-        try {
-            & taskkill.exe /F /IM "$tname.exe" /T 2>$null | Out-Null
-        } catch {}
+        Stop-UnprotectedByName $tname
     }
 
     if (-not $safeProcNames.Contains("msedge")) {
-        try { & taskkill.exe /F /IM "msedge.exe" /T 2>$null | Out-Null } catch {}
+        Stop-UnprotectedByName "msedge"
     }
 }
 

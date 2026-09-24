@@ -167,7 +167,101 @@ public class TaskbarDetector {
                 seenPids.Add(pid);
                 list.Add(new WinItem { Pid = pid, Title = title, IsIconic = isIconic });
             }
+            // UWP / Store apps draw inside ApplicationFrameHost: also protect the real app process that owns the content
+            uint framePid = pid;
+            EnumChildWindows(hWnd, (child, lp) => {
+                uint cpid = 0;
+                GetWindowThreadProcessId(child, out cpid);
+                if (cpid > 0 && cpid != framePid && cpid != currentPid && !seenPids.Contains(cpid)) {
+                    seenPids.Add(cpid);
+                    list.Add(new WinItem { Pid = cpid, Title = title, IsIconic = isIconic });
+                }
+                return true;
+            }, IntPtr.Zero);
         }
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PROCESSENTRY32W {
+        public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+
+    // Terminals and shells: everything running inside them is interactive work (a dev server, a CLI, a script).
+    static readonly HashSet<string> TerminalRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "wsl.exe", "wslhost.exe",
+        "OpenConsole.exe", "conhost.exe", "WindowsTerminal.exe", "wt.exe" };
+
+    // Shell hosts launch nearly every app (tray apps included), so protection never flows through them.
+    static readonly HashSet<string> NoInherit = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+        "explorer.exe", "svchost.exe", "sihost.exe", "ApplicationFrameHost.exe", "RuntimeBroker.exe",
+        "ShellExperienceHost.exe", "StartMenuExperienceHost.exe", "SearchHost.exe", "ShellHost.exe",
+        "TextInputHost.exe", "dwm.exe", "winlogon.exe", "userinit.exe", "services.exe", "wininit.exe",
+        "csrss.exe", "taskhostw.exe", "ctfmon.exe", "System", "[System Process]" };
+
+    /// PIDs that must never be terminated: every process with a visible window, the shell behind a
+    /// console window, every terminal/shell, and the whole child tree of all of those.
+    public static HashSet<int> GetProtectedPids(List<WinItem> windows) {
+        var names = new Dictionary<int, string>();
+        var parents = new Dictionary<int, int>();
+        IntPtr snap = CreateToolhelp32Snapshot(0x00000002 /*TH32CS_SNAPPROCESS*/, 0);
+        if (snap != IntPtr.Zero && snap != new IntPtr(-1)) {
+            try {
+                var e = new PROCESSENTRY32W();
+                e.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                if (Process32FirstW(snap, ref e)) {
+                    do { names[(int)e.th32ProcessID] = e.szExeFile; parents[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; }
+                    while (Process32NextW(snap, ref e));
+                }
+            } finally { CloseHandle(snap); }
+        }
+        var children = new Dictionary<int, List<int>>();
+        foreach (var kv in parents) {
+            if (kv.Value == kv.Key || !names.ContainsKey(kv.Value)) continue;
+            List<int> list;
+            if (!children.TryGetValue(kv.Value, out list)) { list = new List<int>(); children[kv.Value] = list; }
+            list.Add(kv.Key);
+        }
+
+        var roots = new List<int>();
+        roots.Add(System.Diagnostics.Process.GetCurrentProcess().Id);
+        foreach (var w in windows) {
+            int id = (int)w.Pid;
+            roots.Add(id);
+            string n; int pp;
+            if (names.TryGetValue(id, out n) && (string.Equals(n, "conhost.exe", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(n, "OpenConsole.exe", StringComparison.OrdinalIgnoreCase)) && parents.TryGetValue(id, out pp)) roots.Add(pp);
+        }
+        foreach (var kv in names) if (TerminalRoots.Contains(kv.Value)) roots.Add(kv.Key);
+
+        var result = new HashSet<int>();
+        var queue = new Queue<int>();
+        foreach (int r in roots) if (result.Add(r)) queue.Enqueue(r);
+        while (queue.Count > 0) {
+            int id = queue.Dequeue();
+            string n;
+            if (names.TryGetValue(id, out n) && NoInherit.Contains(n)) continue;
+            List<int> kids;
+            if (children.TryGetValue(id, out kids)) foreach (int c in kids) if (result.Add(c)) queue.Enqueue(c);
+        }
+        return result;
     }
 
     public static List<WinItem> GetTaskbarWindows() {
@@ -200,6 +294,7 @@ public class TaskbarDetector {
 # Services to stop (Razer + Office + Gigabyte services)
 $script:CurrentTargetsToKill = @()
 $script:SafeProcNames = @()
+$script:ProtectedPids = @()
 $script:ServicesToStop = @(
     "ClickToRunSvc",
     "Razer Chroma SDK Diagnostic Service",
@@ -222,7 +317,7 @@ $coreOSWhitelist = @(
     "audiodg", "ctfmon", "TextInputHost",
     "nvcontainer", "NVDisplay.Container", "atieclxx", "AudioCaptureService", "amdpmfservice", "amdpmfserviceuser",
     "StartMenuExperienceHost", "ShellExperienceHost", "RuntimeBroker",
-    "powershell", "pwsh", "cmd", "conhost", "Antigravity IDE", "bash", "wsl", "git", "python", "pythonw", "Code", "language_server_windows_x64",
+    "powershell", "pwsh", "cmd", "conhost", "OpenConsole", "WindowsTerminal", "wt", "Antigravity IDE", "bash", "wsl", "git", "python", "pythonw", "Code", "language_server_windows_x64",
     "DAX3API", "GameInputRedistService", "GameInputSvc", "Gbt.GpuPowerGear.Proxy", "Gbt.GpuPowerGear.Service"
 )
 
@@ -236,6 +331,8 @@ $ScanWork = {
 
     # 1. Detect ALL windows currently open on the Taskbar or Desktop
     $taskbarWins = [TaskbarDetector]::GetTaskbarWindows()
+    # Process-level protection: visible apps, terminals/shells and everything running inside them
+    $protectedPids = [TaskbarDetector]::GetProtectedPids($taskbarWins)
     $safeProcNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $protectedList = [System.Collections.Generic.List[object]]::new()
 
@@ -274,8 +371,9 @@ $ScanWork = {
     foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
         $pname = $p.ProcessName
 
-        # Skip if safe
+        # Skip if safe (by name, or because it belongs to a visible app / terminal)
         if ($safeProcNames.Contains($pname)) { continue }
+        if ($protectedPids.Contains($p.Id)) { continue }
 
         # Match: ANY process running in the user's session OR matching bloat/services in Session 0
         $isBloat = ($p.SessionId -eq $userSession) -or
@@ -309,6 +407,7 @@ $ScanWork = {
 
     @{
         Safe          = @($safeProcNames)
+        ProtectedPids = @($protectedPids)
         Protected     = $protectedGroups
         Targets       = $targets.ToArray()
         TargetGroups  = @($targetGroups | Sort-Object -Property Bytes -Descending)
@@ -319,9 +418,17 @@ $ScanWork = {
 
 # Purge Action: NO MERCY WITH SUPERVISOR TERMINATION
 $PurgeWork = {
-    param($Targets, $Services, $IsAdmin, $SafeNames, $WhatIf)
+    param($Targets, $Services, $IsAdmin, $SafeNames, $ProtectedPids, $WhatIf)
     $killedCount = 0
     $bytesFreed = [long]0
+    $protected = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($id in @($ProtectedPids)) { [void]$protected.Add([int]$id) }
+    # Name-based clean-up that never touches a protected process (a visible app, a terminal, or anything inside one)
+    function Stop-UnprotectedByName([string]$name) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            if (-not $protected.Contains($p.Id)) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {} }
+        }
+    }
 
     if ($WhatIf) {
         foreach ($t in $Targets) { $bytesFreed += $t.WorkingSet; $killedCount++ }
@@ -338,9 +445,11 @@ $PurgeWork = {
         }
     }
 
-    # 2. Terminate all target background processes
+    # 2. Terminate all target background processes (only the process itself: no /T, so a protected app that a
+    #    background process happened to launch - e.g. a terminal - survives)
     $targetNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($proc in $Targets) {
+        if ($protected.Contains([int]$proc.Id)) { continue }
         try {
             $bytesFreed += $proc.WorkingSet
             [void]$targetNames.Add($proc.Name)
@@ -348,55 +457,60 @@ $PurgeWork = {
             $killedCount++
         } catch {}
         try {
-            & taskkill.exe /F /PID $proc.Id /T 2>$null | Out-Null
+            & taskkill.exe /F /PID $proc.Id 2>$null | Out-Null
         } catch {}
     }
 
     # 3. Terminate SearchHost first if msedgewebview2 is targeted to stop instant resurrection
     if ($targetNames.Contains("msedgewebview2") -or $targetNames.Contains("SearchHost")) {
-        try { & taskkill.exe /F /IM "SearchHost.exe" /T 2>$null | Out-Null } catch {}
-        try { & taskkill.exe /F /IM "msedgewebview2.exe" /T 2>$null | Out-Null } catch {}
+        Stop-UnprotectedByName "SearchHost"
+        Stop-UnprotectedByName "msedgewebview2"
     }
 
-    # 4. Kill all matching process trees by Image Name
+    # 4. Catch respawned instances of every target name (protected processes of the same name are kept)
     foreach ($tname in $targetNames) {
-        try {
-            & taskkill.exe /F /IM "$tname.exe" /T 2>$null | Out-Null
-        } catch {}
+        Stop-UnprotectedByName $tname
     }
 
     # 5. Clean up any lingering background msedge instances if Edge has no active taskbar window
     $safeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($SafeNames), [System.StringComparer]::OrdinalIgnoreCase)
     if (-not $safeSet.Contains("msedge")) {
-        try { & taskkill.exe /F /IM "msedge.exe" /T 2>$null | Out-Null } catch {}
+        Stop-UnprotectedByName "msedge"
     }
 
     @{ Killed = $killedCount; Bytes = $bytesFreed }
 }
 
 $KillWork = {
-    param($Name, $WhatIf)
+    param($Name, $ProtectedPids, $IncludeProtected, $WhatIf)
     $killed = 0
+    $protected = [System.Collections.Generic.HashSet[int]]::new()
+    # Ending an app from the Protected tab is an explicit choice, so only background rows respect protection
+    if (-not $IncludeProtected) { foreach ($id in @($ProtectedPids)) { [void]$protected.Add([int]$id) } }
+    $victims = @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object { -not $protected.Contains($_.Id) })
     if ($WhatIf) {
-        $killed = @(Get-Process -Name $Name -ErrorAction SilentlyContinue).Count
-        return @{ Name = $Name; Killed = $killed }
+        return @{ Name = $Name; Killed = $victims.Count }
     }
 
-    # Supervisor termination for Edge webview / SearchHost
+    # Supervisor termination for Edge webview / SearchHost (never touching protected processes)
     if ($Name -eq "msedgewebview2" -or $Name -eq "SearchHost") {
-        try { & taskkill.exe /F /IM "SearchHost.exe" /T 2>$null | Out-Null } catch {}
-        try { & taskkill.exe /F /IM "msedgewebview2.exe" /T 2>$null | Out-Null } catch {}
+        foreach ($n in @("SearchHost", "msedgewebview2")) {
+            foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+                if (-not $protected.Contains($p.Id)) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {} }
+            }
+        }
     }
 
-    Get-Process -Name $Name -ErrorAction SilentlyContinue | ForEach-Object {
+    foreach ($p in $victims) {
         try {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             $killed++
         } catch {}
+        if ($IncludeProtected) {
+            # the user explicitly ended a visible app: take its whole tree down like Task Manager's End task
+            try { & taskkill.exe /F /PID $p.Id /T 2>$null | Out-Null } catch {}
+        }
     }
-    try {
-        & taskkill.exe /F /IM "$Name.exe" /T 2>$null | Out-Null
-    } catch {}
 
     @{ Name = $Name; Killed = $killed }
 }
@@ -1104,10 +1218,10 @@ function New-AppRow {
     $xmark.VerticalAlignment = 'Center'
     $xmark.SetResourceReference([System.Windows.Shapes.Shape]::StrokeProperty, 'Red')
     $end.Child = $xmark
-    $end.Tag = $KillName
+    $end.Tag = @{ Name = $KillName; Protected = $Protected }
     $end.Add_MouseEnter({ param($s, $e) $s.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, 'RedSoft') })
     $end.Add_MouseLeave({ param($s, $e) $s.SetResourceReference([System.Windows.Controls.Border]::BackgroundProperty, 'Fill') })
-    $end.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Kill-SpecificProcess $s.Tag })
+    $end.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Kill-SpecificProcess $s.Tag.Name $s.Tag.Protected })
     [System.Windows.Controls.Grid]::SetColumn($end, 3)
     [void]$grid.Children.Add($end)
     [void]$row.Children.Add($grid)
@@ -1298,6 +1412,7 @@ function Update-FromScan($data) {
     $script:HasScanned = $true
     $script:CurrentTargetsToKill = @($data.Targets)
     $script:SafeProcNames = @($data.Safe)
+    $script:ProtectedPids = @($data.ProtectedPids)
     $groups = @($data.TargetGroups)
     $protected = @($data.Protected)
     $script:TargetGroupCount = $groups.Count
@@ -1399,7 +1514,7 @@ function Show-Hud([string]$Title, [string]$Body, [string]$Kind = 'success') {
 # ---------------------------------------------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------------------------------------------
-function Kill-SpecificProcess ($procName) {
+function Kill-SpecificProcess ($procName, [bool]$includeProtected = $false) {
     if ([string]::IsNullOrWhiteSpace($procName)) { return }
 
     $forbidden = @("System", "Idle", "Registry", "smss", "csrss", "wininit", "services", "lsass", "winlogon", "dwm", "sihost", "explorer", "powershell", "pwsh", "Antigravity IDE")
@@ -1408,7 +1523,7 @@ function Kill-SpecificProcess ($procName) {
         return
     }
 
-    Invoke-Async $KillWork @{ Name = $procName; WhatIf = [bool]$SimulateOnly } {
+    Invoke-Async $KillWork @{ Name = $procName; ProtectedPids = @($script:ProtectedPids); IncludeProtected = $includeProtected; WhatIf = [bool]$SimulateOnly } {
         param($result)
         $n = if ($result) { [int]$result.Killed } else { 0 }
         $what = if ($n -eq 1) { '1 instance' } else { "$n instances" }
@@ -1439,7 +1554,7 @@ function Start-Purge {
         try { $ws = $p.WorkingSet64 } catch {}
         [PSCustomObject]@{ Id = $p.Id; Name = $p.ProcessName; WorkingSet = $ws }
     })
-    Invoke-Async $PurgeWork @{ Targets = $targets; Services = $script:ServicesToStop; IsAdmin = [bool]$isAdmin; SafeNames = @($script:SafeProcNames); WhatIf = [bool]$SimulateOnly } {
+    Invoke-Async $PurgeWork @{ Targets = $targets; Services = $script:ServicesToStop; IsAdmin = [bool]$isAdmin; SafeNames = @($script:SafeProcNames); ProtectedPids = @($script:ProtectedPids); WhatIf = [bool]$SimulateOnly } {
         param($result)
         $script:Busy = $false
         $killed = if ($result) { [int]$result.Killed } else { 0 }
