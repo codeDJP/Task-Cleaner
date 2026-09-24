@@ -554,7 +554,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
             catch (InvalidOperationException) { }
         }
 
-        /// Keeps every live surface's backdrop aligned every frame for `ms` milliseconds ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â call it while
+        /// Keeps every live surface's backdrop aligned every frame for `ms` milliseconds ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â call it while
         /// render-transform animations (which don't trigger layout) are moving glass around.
         public static void TrackAll(int ms)
         {
@@ -803,7 +803,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
                 name = fvi.FileDescription;
                 if (name != null)
                 {
-                    name = name.Replace("Ãƒâ€šÃ‚Â®", "").Replace("ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢", "").Replace("(R)", "").Replace("(TM)", "").Trim();
+                    name = name.Replace("ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â®", "").Replace("ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢", "").Replace("(R)", "").Replace("(TM)", "").Trim();
                     while (name.Contains("  ")) name = name.Replace("  ", " ");
                 }
                 if (string.IsNullOrWhiteSpace(name)) name = null;
@@ -968,6 +968,12 @@ float4 main(float2 uv : TEXCOORD) : COLOR
                 if (rgn != IntPtr.Zero) SetWindowRgn(hwnd, rgn, true); // the system owns the region afterwards
             }
             catch { }
+        }
+
+        /// Windows 11 rounded corners + native shadow; DWM also clips the blur-behind to the rounded shape.
+        public static void RoundDwmCorners(IntPtr hwnd)
+        {
+            try { int v = 2; DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, ref v, 4); } catch { }
         }
 
         /// The window draws its own (larger, Apple-style) corners and shadow: ask DWM not to add its own.

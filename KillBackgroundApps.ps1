@@ -386,8 +386,8 @@ if (-not $NoPopup) {
 
         <!-- Clear Liquid Glass card: whatever is behind it shows through -->
         <Grid x:Name="Card">
-            <Border CornerRadius="22" Background="__Tint__"/>
-            <Border CornerRadius="22" IsHitTestVisible="False">
+            <Border CornerRadius="8" Background="__Tint__"/>
+            <Border CornerRadius="8" IsHitTestVisible="False">
                 <Border.Background>
                     <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
                         <GradientStop Color="__Sheen__" Offset="0"/>
@@ -395,7 +395,7 @@ if (-not $NoPopup) {
                     </LinearGradientBrush>
                 </Border.Background>
             </Border>
-            <Border CornerRadius="22" IsHitTestVisible="False" BorderThickness="1.2">
+            <Border CornerRadius="8" IsHitTestVisible="False" BorderThickness="1.2">
                 <Border.BorderBrush>
                     <LinearGradientBrush StartPoint="0,0" EndPoint="0.7,1">
                         <GradientStop Color="__RimHi__" Offset="0"/>
@@ -472,9 +472,7 @@ if (-not $NoPopup) {
 
         $window.Add_SourceInitialized({
             $hwnd = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
-            [LiquidGlass.Native]::DisableDwmRounding($hwnd)
-            $scale = [System.Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformToDevice.M11
-            [LiquidGlass.Native]::SetRoundedRegion($hwnd, [int][Math]::Round(22 * $scale))
+            [LiquidGlass.Native]::RoundDwmCorners($hwnd)
             [void][LiquidGlass.Native]::EnableBlurBehind($hwnd)
         })
 

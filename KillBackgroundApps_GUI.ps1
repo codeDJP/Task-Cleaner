@@ -628,8 +628,8 @@ $xaml = @'
 
         <Grid x:Name="SceneContainer">
             <!-- Window: a clear slab of Liquid Glass - whatever is behind the window shows through it -->
-            <Border x:Name="Body" CornerRadius="26" Background="{DynamicResource BodyTint}"/>
-            <Border CornerRadius="26" IsHitTestVisible="False">
+            <Border x:Name="Body" CornerRadius="8" Background="{DynamicResource BodyTint}"/>
+            <Border CornerRadius="8" IsHitTestVisible="False">
                 <Border.Background>
                     <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
                         <GradientStop Color="{DynamicResource SheenColor}" Offset="0"/>
@@ -637,8 +637,8 @@ $xaml = @'
                     </LinearGradientBrush>
                 </Border.Background>
             </Border>
-            <Border CornerRadius="24.5" Margin="1.5" IsHitTestVisible="False" BorderThickness="1" BorderBrush="{DynamicResource InnerRim}"/>
-            <Border CornerRadius="26" IsHitTestVisible="False" BorderThickness="1.2">
+            <Border CornerRadius="6.5" Margin="1.5" IsHitTestVisible="False" BorderThickness="1" BorderBrush="{DynamicResource InnerRim}"/>
+            <Border CornerRadius="8" IsHitTestVisible="False" BorderThickness="1.2">
                 <Border.BorderBrush>
                     <LinearGradientBrush StartPoint="0,0" EndPoint="0.7,1">
                         <GradientStop Color="{DynamicResource RimHiColor}" Offset="0"/>
@@ -1497,10 +1497,8 @@ $window.Add_PreviewKeyDown({
 
 $window.Add_SourceInitialized({
     $hwnd = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
-    [LiquidGlass.Native]::DisableDwmRounding($hwnd)
-    # Clear glass with a light live blur of whatever is behind the window, clipped to the rounded shape
-    $scale = [System.Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformToDevice.M11
-    [LiquidGlass.Native]::SetRoundedRegion($hwnd, [int][Math]::Round(26 * $scale))
+    # Clear glass with a light live blur of whatever is behind; Windows 11 rounds and clips it
+    [LiquidGlass.Native]::RoundDwmCorners($hwnd)
     [void][LiquidGlass.Native]::EnableBlurBehind($hwnd)
     $script:Watcher = [LiquidGlass.SystemWatcher]::new($window)
     $script:Watcher.add_Changed({
