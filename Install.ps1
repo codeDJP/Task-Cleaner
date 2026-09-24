@@ -20,19 +20,19 @@ if ($Uninstall) {
 Get-ChildItem -Path $here -File | Unblock-File -ErrorAction SilentlyContinue
 
 $shell = New-Object -ComObject WScript.Shell
-function New-Shortcut([string]$path, [string]$launcher, [string]$description) {
+function New-Shortcut([string]$path, [string]$launcher, [string]$description, [string]$icon = 'icon.ico') {
     $sc = $shell.CreateShortcut($path)
     $sc.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
     $sc.Arguments = "`"$(Join-Path $here $launcher)`""
     $sc.WorkingDirectory = $here
-    $sc.IconLocation = "$(Join-Path $here 'icon.ico'),0"
+    $sc.IconLocation = "$(Join-Path $here $icon),0"
     $sc.Description = $description
     $sc.Save()
 }
 
 New-Shortcut $targets[0] 'run_app.vbs' 'Open the dashboard: see background apps and purge them while visible apps stay safe.'
 New-Shortcut $targets[1] 'run_app.vbs' 'Open the dashboard: see background apps and purge them while visible apps stay safe.'
-New-Shortcut $targets[2] 'run_silent.vbs' 'One click: close background apps now and show a small summary.'
+New-Shortcut $targets[2] 'run_silent.vbs' 'One click: close background apps now and show a small summary.' 'quick.ico'
 
 Write-Host ""
 Write-Host "  $name is installed." -ForegroundColor Green
