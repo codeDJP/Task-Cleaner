@@ -928,6 +928,48 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX m);
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+        [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int AccentState; public int AccentFlags; public uint GradientColor; public int AnimationId; }
+        [StructLayout(LayoutKind.Sequential)] struct WindowCompositionAttributeData { public int Attribute; public IntPtr Data; public int SizeOfData; }
+        [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+        [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr hwnd, IntPtr hrgn, bool redraw);
+
+        /// Live, light blur of whatever is behind the window (Windows 10/11 DWM blur-behind).
+        public static bool EnableBlurBehind(IntPtr hwnd)
+        {
+            try
+            {
+                AccentPolicy a = new AccentPolicy();
+                a.AccentState = 3; // ACCENT_ENABLE_BLURBEHIND
+                int size = Marshal.SizeOf(typeof(AccentPolicy));
+                IntPtr p = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(a, p, false);
+                    WindowCompositionAttributeData d = new WindowCompositionAttributeData();
+                    d.Attribute = 19; // WCA_ACCENT_POLICY
+                    d.Data = p;
+                    d.SizeOfData = size;
+                    return SetWindowCompositionAttribute(hwnd, ref d) != 0;
+                }
+                finally { Marshal.FreeHGlobal(p); }
+            }
+            catch { return false; }
+        }
+
+        /// Clips the window (and therefore the blur) to a rounded rectangle. radiusPx is in window pixels.
+        public static void SetRoundedRegion(IntPtr hwnd, int radiusPx)
+        {
+            try
+            {
+                RECT r;
+                if (!GetWindowRect(hwnd, out r)) return;
+                IntPtr rgn = CreateRoundRectRgn(0, 0, r.Right - r.Left + 1, r.Bottom - r.Top + 1, radiusPx * 2, radiusPx * 2);
+                if (rgn != IntPtr.Zero) SetWindowRgn(hwnd, rgn, true); // the system owns the region afterwards
+            }
+            catch { }
+        }
+
         /// The window draws its own (larger, Apple-style) corners and shadow: ask DWM not to add its own.
         public static void DisableDwmRounding(IntPtr hwnd)
         {

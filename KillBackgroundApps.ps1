@@ -372,11 +372,11 @@ if (-not $NoPopup) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:lg="clr-namespace:LiquidGlass;assembly=__ASM__"
-        Title="Safe Background Task Killer - Notification" Width="432" SizeToContent="Height"
+        Title="Safe Background Task Killer - Notification" Width="380" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
         Topmost="True" ShowInTaskbar="False" ShowActivated="False" WindowStartupLocation="Manual" UseLayoutRounding="True"
         FontFamily="SF Pro Text, Segoe UI Variable Text, Segoe UI" TextOptions.TextFormattingMode="Ideal">
-    <Grid x:Name="Root" Margin="26" RenderTransformOrigin="1,0">
+    <Grid x:Name="Root" RenderTransformOrigin="1,0">
         <Grid.RenderTransform>
             <TransformGroup>
                 <ScaleTransform x:Name="Scale"/>
@@ -429,7 +429,7 @@ if (-not $NoPopup) {
         </Grid>
 
         <!-- macOS reveals the close button on hover, at the card's top-left corner -->
-        <Border x:Name="CloseBtn" Width="20" Height="20" CornerRadius="10" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-6,-6,0,0"
+        <Border x:Name="CloseBtn" Width="20" Height="20" CornerRadius="10" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="5,5,0,0"
                 Background="__CloseBg__" Opacity="0">
             <Border.Effect><DropShadowEffect BlurRadius="6" ShadowDepth="1" Direction="270" Opacity="0.3"/></Border.Effect>
             <Path Data="M0,0 L6,6 M6,0 L0,6" Stroke="__Secondary__" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
@@ -467,38 +467,32 @@ if (-not $NoPopup) {
 
         # Top-right of the work area, like a macOS notification
         $screen = [System.Windows.SystemParameters]::WorkArea
-        $window.Left = $screen.Right - $window.Width + 14
-        $window.Top = $screen.Top - 8
+        $window.Left = $screen.Right - $window.Width - 12
+        $window.Top = $screen.Top + 12
 
         $window.Add_SourceInitialized({
             $hwnd = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
             [LiquidGlass.Native]::DisableDwmRounding($hwnd)
+            $scale = [System.Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformToDevice.M11
+            [LiquidGlass.Native]::SetRoundedRegion($hwnd, [int][Math]::Round(22 * $scale))
+            [void][LiquidGlass.Native]::EnableBlurBehind($hwnd)
         })
 
         $script:Dismissing = $false
         function Hide-Notification {
             if ($script:Dismissing) { return }
             $script:Dismissing = $true
-            [LiquidGlass.Motion]::Ease($root, [System.Windows.UIElement]::OpacityProperty, 0, 220)
-            [LiquidGlass.Motion]::Ease($shift, [System.Windows.Media.TranslateTransform]::XProperty, 70, 240)
-            [LiquidGlass.GlassSurface]::TrackAll(300)
+            [LiquidGlass.Motion]::Ease($root, [System.Windows.UIElement]::OpacityProperty, 0, 200)
             $done = [System.Windows.Threading.DispatcherTimer]::new()
             $done.Interval = [TimeSpan]::FromMilliseconds(250)
             $done.Add_Tick({ $window.Close() })
             $done.Start()
         }
 
-        # Slide in from the screen edge on a bouncy spring
+        # Fade in over the blurred glass pane
         $root.Opacity = 0
-        $shift.X = 90
-        $scale.ScaleX = 0.96
-        $scale.ScaleY = 0.96
         $window.Add_ContentRendered({
-            [LiquidGlass.Motion]::Ease($root, [System.Windows.UIElement]::OpacityProperty, 1, 120)
-            [LiquidGlass.Motion]::Spring($shift, [System.Windows.Media.TranslateTransform]::XProperty, 0, 520, 0.22)
-            [LiquidGlass.Motion]::Spring($scale, [System.Windows.Media.ScaleTransform]::ScaleXProperty, 1, 520, 0.22)
-            [LiquidGlass.Motion]::Spring($scale, [System.Windows.Media.ScaleTransform]::ScaleYProperty, 1, 520, 0.22)
-            [LiquidGlass.GlassSurface]::TrackAll(900)
+            [LiquidGlass.Motion]::Ease($root, [System.Windows.UIElement]::OpacityProperty, 1, 200)
         })
 
         $timer = [System.Windows.Threading.DispatcherTimer]::new()

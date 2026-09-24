@@ -473,7 +473,7 @@ $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:lg="clr-namespace:LiquidGlass;assembly=__ASM__"
-        Title="Safe Background Task Killer" Width="624" Height="804"
+        Title="Safe Background Task Killer" Width="560" Height="740"
         WindowStartupLocation="CenterScreen" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" Icon="__ICO__" UseLayoutRounding="True" SnapsToDevicePixels="True"
         FontFamily="SF Pro Text, Segoe UI Variable Text, Segoe UI" FontSize="13"
@@ -623,7 +623,7 @@ $xaml = @'
         </Style>
     </Window.Resources>
 
-    <Grid x:Name="Root" Margin="32" RenderTransformOrigin="0.5,0.5">
+    <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5">
         <Grid.RenderTransform><ScaleTransform x:Name="RootScale" ScaleX="1" ScaleY="1"/></Grid.RenderTransform>
 
         <Grid x:Name="SceneContainer">
@@ -1462,10 +1462,8 @@ function Open-Config {
 function Close-Animated {
     if ($script:Closing) { return }
     $script:Closing = $true
-    Fade $ui.Root 0 150
-    [LiquidGlass.Motion]::Ease($ui.RootScale, [System.Windows.Media.ScaleTransform]::ScaleXProperty, 0.96, 150)
-    [LiquidGlass.Motion]::Ease($ui.RootScale, [System.Windows.Media.ScaleTransform]::ScaleYProperty, 0.96, 150)
-    Invoke-Later 160 { $window.Close() }
+    Fade $ui.Root 0 120
+    Invoke-Later 130 { $window.Close() }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1498,7 +1496,12 @@ $window.Add_PreviewKeyDown({
 })
 
 $window.Add_SourceInitialized({
-    [LiquidGlass.Native]::DisableDwmRounding([System.Windows.Interop.WindowInteropHelper]::new($window).Handle)
+    $hwnd = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
+    [LiquidGlass.Native]::DisableDwmRounding($hwnd)
+    # Clear glass with a light live blur of whatever is behind the window, clipped to the rounded shape
+    $scale = [System.Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformToDevice.M11
+    [LiquidGlass.Native]::SetRoundedRegion($hwnd, [int][Math]::Round(26 * $scale))
+    [void][LiquidGlass.Native]::EnableBlurBehind($hwnd)
     $script:Watcher = [LiquidGlass.SystemWatcher]::new($window)
     $script:Watcher.add_Changed({
         param($kind)
@@ -1509,15 +1512,11 @@ $window.Add_SourceInitialized({
     })
 })
 
-# Materialize: scale up from 0.94 on a smooth spring, opacity only at the very start
+# Materialize: the glass pane appears and its content fades in
 $ui.Root.Opacity = 0
-$ui.RootScale.ScaleX = 0.94
-$ui.RootScale.ScaleY = 0.94
 $window.Add_ContentRendered({
-    Fade $ui.Root 1 140
-    [LiquidGlass.Motion]::Spring($ui.RootScale, [System.Windows.Media.ScaleTransform]::ScaleXProperty, 1, 520, 0.1)
-    [LiquidGlass.Motion]::Spring($ui.RootScale, [System.Windows.Media.ScaleTransform]::ScaleYProperty, 1, 520, 0.1)
-    [LiquidGlass.GlassSurface]::TrackAll(900)
+    Fade $ui.Root 1 220
+    [LiquidGlass.GlassSurface]::TrackAll(600)
 })
 
 $window.Add_Closed({
